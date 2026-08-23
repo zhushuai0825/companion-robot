@@ -1,0 +1,11 @@
+# 速度、阈值等。API Key 放 .env，不要写进本文件。
+deepseek:
+  base_url: https://api.deepseek.com
+  model: deepseek-chat
+
+voice:
+  stt: cloud
+  tts: edge-tts
+
+motion:
+  obstacle_stop_cm: 25

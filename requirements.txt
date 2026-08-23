@@ -1,0 +1,9 @@
+pytest>=8.0
+allure-pytest>=2.13
+pytest-rerunfailures>=14.0
+edge-tts>=7.0
+opencv-python>=4.10
+python-dotenv>=1.0
+openai>=1.40
+vosk>=0.3.45
+PyYAML>=6.0
