@@ -1,8 +1,9 @@
 """录音、Vosk 识别、TTS 播报（voice_chat / companion 共用）。
 
 TTS 后端：
-  edge  — Microsoft Edge 在线神经语音（edge-tts，需联网）
-  piper — 本地 Piper 模型（离线，需自行下载 .onnx）
+  edge    — Microsoft Edge 在线神经语音（edge-tts，需联网）
+  minimax — MiniMax 情感 TTS（需 MINIMAX_API_KEY，国内 api.minimaxi.com）
+  piper   — 本地 Piper 模型（离线，需自行下载 .onnx）
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ class TtsConfig:
     style: str = ""
     styledegree: str = "1.2"
     piper_model: str = ""
+    minimax_model: str = "speech-2.8-hd"
     performative: bool = True
 
 
@@ -86,6 +88,7 @@ def apply_emotion(base: TtsConfig, emotion: str) -> TtsConfig:
         style=base.style,
         styledegree=base.styledegree,
         piper_model=base.piper_model,
+        minimax_model=base.minimax_model,
         performative=base.performative,
     )
 
@@ -107,8 +110,52 @@ def _tts_key(cfg: TtsConfig) -> tuple:
         cfg.style,
         cfg.styledegree,
         cfg.piper_model,
+        cfg.minimax_model,
         cfg.performative,
     )
+
+
+MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY", "").strip()
+MINIMAX_API_BASE = os.getenv(
+    "MINIMAX_API_BASE", "https://api.minimaxi.com/v1"
+).strip().rstrip("/")
+MINIMAX_GROUP_ID = os.getenv("MINIMAX_GROUP_ID", "").strip()
+
+# speech-2.8 自动情感；2.6 可显式传 emotion
+MINIMAX_EMOTION_MAP: dict[str, str] = {
+    "happy": "happy",
+    "sad": "sad",
+    "silence": "sad",
+}
+
+
+def _percent_to_ratio(pct: str, default: float = 1.0) -> float:
+    m = re.match(r"([+-]?\d+)%", (pct or "").strip())
+    if not m:
+        return default
+    return max(0.5, min(2.0, 1.0 + int(m.group(1)) / 100.0))
+
+
+def _hz_to_minimax_pitch(pitch: str) -> int:
+    m = re.match(r"([+-]?\d+)Hz", (pitch or "").strip(), re.I)
+    if not m:
+        return 0
+    return max(-12, min(12, int(round(int(m.group(1)) / 6))))
+
+
+def _minimax_voice_setting(tts: TtsConfig, emotion: str = "") -> dict:
+    setting = {
+        "voice_id": tts.voice,
+        "speed": round(_percent_to_ratio(tts.rate, 0.88), 2),
+        "vol": round(_percent_to_ratio(tts.volume, 0.92), 2),
+        "pitch": _hz_to_minimax_pitch(tts.pitch),
+    }
+    model = tts.minimax_model or "speech-2.8-hd"
+    if model.startswith("speech-2.6") and emotion:
+        mapped = MINIMAX_EMOTION_MAP.get(emotion.lower(), "")
+        if mapped:
+            setting["emotion"] = mapped
+    return setting
 
 
 # 树莓派上实测可用的备用链（男声优先）
@@ -729,6 +776,61 @@ async def _edge_save_mp3(ssml: str, mp3: Path) -> None:
     mp3.write_bytes(b"".join(audio_parts))
 
 
+async def _minimax_synthesize(text: str, mp3: Path, tts: TtsConfig) -> None:
+    import aiohttp
+
+    if not MINIMAX_API_KEY:
+        raise RuntimeError("缺少 MINIMAX_API_KEY，请在 src/.env 配置")
+
+    clean = re.sub(r"<<emotion:[^>]*>>", "", text, flags=re.I)
+    clean = _clean_tts_text(clean)
+    if not clean:
+        raise RuntimeError("MiniMax TTS：文本为空")
+
+    url = f"{MINIMAX_API_BASE}/t2a_v2"
+    group_id = MINIMAX_GROUP_ID
+    if group_id and not MINIMAX_API_KEY.startswith("sk-api-"):
+        url = f"{url}?GroupId={group_id}"
+
+    payload = {
+        "model": tts.minimax_model or "speech-2.8-hd",
+        "text": clean,
+        "stream": False,
+        "voice_setting": _minimax_voice_setting(tts),
+        "audio_setting": {
+            "sample_rate": 32000,
+            "bitrate": 128000,
+            "format": "mp3",
+            "channel": 1,
+        },
+        "language_boost": "Chinese",
+        "output_format": "hex",
+    }
+
+    headers = {
+        "Authorization": f"Bearer {MINIMAX_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, headers=headers, json=payload) as resp:
+            body = await resp.json(content_type=None)
+
+    base_resp = body.get("base_resp") or {}
+    if base_resp.get("status_code", 0) != 0:
+        raise RuntimeError(
+            f"MiniMax API [{base_resp.get('status_code')}]: "
+            f"{base_resp.get('status_msg', body)}"
+        )
+
+    audio_hex = (body.get("data") or {}).get("audio", "")
+    if not audio_hex:
+        raise RuntimeError(f"MiniMax 未返回音频: {body}")
+
+    mp3.write_bytes(bytes.fromhex(audio_hex))
+
+
 async def _edge_synthesize(text: str, mp3: Path, tts: TtsConfig) -> None:
     import edge_tts
 
@@ -803,7 +905,12 @@ async def text_to_speech_file(text: str, out: Path, tts: TtsConfig) -> None:
                 continue
 
             mp3 = out if out.suffix.lower() == ".mp3" else out.with_suffix(".mp3")
-            await _edge_synthesize(text, mp3, cfg)
+            if cfg.backend == "minimax":
+                await _minimax_synthesize(text, mp3, cfg)
+            elif cfg.backend == "piper":
+                raise RuntimeError("piper branch handled above")
+            else:
+                await _edge_synthesize(text, mp3, cfg)
             if mp3.exists() and mp3.stat().st_size > 500:
                 if mp3 != out:
                     mp3.rename(out)
@@ -821,11 +928,16 @@ async def text_to_speech_file(text: str, out: Path, tts: TtsConfig) -> None:
     msg = "语音合成失败。"
     if tts.backend == "piper":
         msg += " Piper 本地模型未就绪，可在 config/companion.yaml 改 tts_backend: edge"
+    elif tts.backend == "minimax":
+        msg += " MiniMax TTS 未返回音频（检查 MINIMAX_API_KEY 与额度）。"
     else:
         msg += " 微软 edge-tts 未返回音频（需联网）。"
     if last_err:
         msg += f" 原因: {last_err}"
-    msg += " 试听: python3 list_tts_voices.py --try zh-CN-YunxiNeural"
+    if tts.backend == "minimax":
+        msg += " 试听: python3 scripts/test_minimax_tts.py"
+    else:
+        msg += " 试听: python3 list_tts_voices.py --try zh-CN-YunxiNeural"
     raise RuntimeError(msg)
 
 

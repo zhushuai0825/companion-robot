@@ -127,12 +127,18 @@ def main() -> None:
 
     name = brain.cfg.get("name", "小伴")
     tts = brain.tts_config()
-    backend_label = "edge-tts 在线" if tts.backend == "edge" else "piper 本地"
+    backend_labels = {
+        "edge": "edge-tts 在线",
+        "minimax": "MiniMax 情感 TTS",
+        "piper": "piper 本地",
+    }
+    backend_label = backend_labels.get(tts.backend, tts.backend)
     print(f"「{name}」情感陪伴已启动（Vosk + DeepSeek + {backend_label}）。")
     print(f"麦克风: {mic}  扬声器: {spk if speaker_ok else '无（仅文字）'}")
     print(describe_audio_hardware())
     print()
-    print(f"音色: {tts.voice}  style={tts.style or '默认'}  表演感TTS: {tts.performative}")
+    model_note = tts.minimax_model if tts.backend == "minimax" else (tts.style or "默认")
+    print(f"音色: {tts.voice}  model={model_note}  表演感TTS: {tts.performative}")
     if continuous:
         print("模式: 连续听 — 直接说话，不用按回车。")
     if barge_in:

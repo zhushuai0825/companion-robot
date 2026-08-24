@@ -365,6 +365,9 @@ class CompanionBrain:
             piper_model=os.getenv(
                 "PIPER_MODEL", speaking.get("piper_model", "")
             ).strip(),
+            minimax_model=os.getenv(
+                "MINIMAX_MODEL", speaking.get("minimax_model", "speech-2.8-hd")
+            ).strip(),
             performative=bool(
                 emotion_cfg.get(
                     "performative_tts",

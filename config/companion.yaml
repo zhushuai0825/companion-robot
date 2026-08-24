@@ -17,12 +17,13 @@ speaking:
   polish: true
   polish_always: true
   performative_tts: true
-  tts_backend: edge
-  tts_voice: zh-CN-YunxiNeural
-  tts_style: narrative-relaxed
-  tts_rate: "-14%"
-  tts_volume: "-10%"
-  tts_pitch: "-8Hz"
+  tts_backend: minimax
+  tts_voice: male-qn-qingse
+  minimax_model: speech-2.8-hd
+  tts_rate: "-12%"
+  tts_volume: "-8%"
+  tts_pitch: "-6Hz"
+  tts_style: ""
   tts_styledegree: "1.2"
 
 voice:
