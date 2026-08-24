@@ -107,12 +107,16 @@ def main() -> None:
         try:
             import asyncio
 
-            from voice_io import TtsConfig, text_to_speech_file
+            from companion_brain import CompanionBrain
+            from voice_io import text_to_speech_file
 
-            tts = TtsConfig(voice="zh-CN-YunxiNeural", style="narrative-relaxed")
-            print("合成男声测试…")
+            brain = CompanionBrain()
+            tts = brain.tts_config()
+            print(f"合成测试（{tts.backend} / {tts.voice}）…")
             asyncio.run(
-                text_to_speech_file("嗯，我在。这是一段男声测试。", mp3, tts)
+                text_to_speech_file(
+                    "嗯，我在。这是一段路遥男声测试。", mp3, tts
+                )
             )
             from audio_duplex import get_duplex, shutdown_duplex
 

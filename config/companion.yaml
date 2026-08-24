@@ -30,8 +30,7 @@ voice:
   continuous: true
   barge_in: true
   mic_device: plughw:3,0
-  # 扬声器：USB 麦无播放时用 HDMI（需接显示器/电视音响）
-  spk_device: plughw:0,0
+  spk_device: plughw:2,0
   listen_timeout_sec: 0
   record_max_sec: 30
   silence_end_ms: 1400

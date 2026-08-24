@@ -12,6 +12,7 @@ import asyncio
 import json
 import math
 import os
+import platform
 import re
 import shutil
 import ssl
@@ -121,6 +122,19 @@ MINIMAX_API_BASE = os.getenv(
 ).strip().rstrip("/")
 MINIMAX_GROUP_ID = os.getenv("MINIMAX_GROUP_ID", "").strip()
 
+
+def _minimax_credentials() -> tuple[str, str, str]:
+    """运行时读取，避免 .env 更新后仍用旧 module 常量。"""
+    return (
+        os.getenv("MINIMAX_API_KEY", MINIMAX_API_KEY).strip(),
+        os.getenv("MINIMAX_API_BASE", MINIMAX_API_BASE).strip().rstrip("/"),
+        os.getenv("MINIMAX_GROUP_ID", MINIMAX_GROUP_ID).strip(),
+    )
+
+
+def _is_linux_alsa() -> bool:
+    return platform.system() == "Linux" and shutil.which("aplay") is not None
+
 # speech-2.8 自动情感；2.6 可显式传 emotion
 MINIMAX_EMOTION_MAP: dict[str, str] = {
     "happy": "happy",
@@ -198,8 +212,63 @@ def _parse_alsa_list(text: str) -> list[tuple[int, int, str]]:
     return devices
 
 
-def _probe_playback(device: str, test_wav: Path) -> bool:
-    return _probe_aplay(device, test_wav)
+def _probe_ffplay(path: Path) -> bool:
+    if not shutil.which("ffplay"):
+        return False
+    try:
+        result = subprocess.run(
+            [
+                "ffplay",
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "quiet",
+                str(path),
+            ],
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _probe_afplay(path: Path) -> bool:
+    if platform.system() != "Darwin" or not shutil.which("afplay"):
+        return False
+    try:
+        result = subprocess.run(
+            ["afplay", str(path)],
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _probe_playback_backend(path: Path, backend: str, device: str = "") -> bool:
+    if backend == "aplay" and device:
+        return _probe_aplay(device, path)
+    if backend == "pw-play":
+        if not shutil.which("pw-play"):
+            return False
+        try:
+            return (
+                subprocess.run(
+                    ["pw-play", str(path)],
+                    capture_output=True,
+                    timeout=5,
+                ).returncode
+                == 0
+            )
+        except OSError:
+            return False
+    if backend == "ffplay":
+        return _probe_ffplay(path)
+    if backend == "afplay":
+        return _probe_afplay(path)
+    return False
 
 
 def _make_probe_wav(path: Path) -> None:
@@ -345,21 +414,18 @@ def find_working_playback(
     test_wav: Path,
     preferred: str = "",
 ) -> tuple[str, str]:
-    """返回 (设备名或 default, backend: aplay|pw-play)。都失败则 ('', '')。"""
-    for device in _playback_probe_order(preferred):
-        if _probe_aplay(device, test_wav):
-            return device, "aplay"
-    if _pipewire_has_hardware_sink() and shutil.which("pw-play"):
-        try:
-            result = subprocess.run(
-                ["pw-play", str(test_wav)],
-                capture_output=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
+    """返回 (设备名或 default, backend: aplay|pw-play|ffplay|afplay)。"""
+    if _is_linux_alsa():
+        for device in _playback_probe_order(preferred):
+            if _probe_aplay(device, test_wav):
+                return device, "aplay"
+        if _pipewire_has_hardware_sink() and shutil.which("pw-cli"):
+            if _probe_playback_backend(test_wav, "pw-play"):
                 return preferred or "default", "pw-play"
-        except OSError:
-            pass
+    if _probe_ffplay(test_wav):
+        return preferred or "default", "ffplay"
+    if _probe_afplay(test_wav):
+        return preferred or "default", "afplay"
     return "", ""
 
 
@@ -391,7 +457,7 @@ def resolve_audio_devices() -> tuple[str, str]:
     mic = os.getenv("MIC_DEVICE", "").strip() or str(yaml_voice.get("mic_device", "")).strip()
     spk = os.getenv("SPK_DEVICE", "").strip() or str(yaml_voice.get("spk_device", "")).strip()
     if not mic:
-        mic = discover_capture_device() or "plughw:3,0"
+        mic = discover_capture_device() or ("plughw:3,0" if _is_linux_alsa() else "")
 
     with tempfile.TemporaryDirectory() as td:
         test_wav = Path(td) / "probe.wav"
@@ -462,23 +528,30 @@ def describe_audio_hardware() -> str:
 
 def audio_setup_hint() -> str:
     hdmi_note = ""
-    if _aplay_list_output() and not is_speaker_available():
+    if _is_linux_alsa() and _aplay_list_output() and not is_speaker_available():
         hdmi_note = (
             "\n（Pi5 HDMI 音频需要接显示器/电视并点亮屏幕；没接 HDMI 会报 error 524，属正常。）\n"
         )
     usb_note = ""
-    caps = usb_capture_only_cards()
-    if caps:
-        usb_note = (
-            "\n你的 USB PnP Sound Device（芯片 PCM2902）在系统里只有麦克风通道，"
-            "没有播放通道，树莓派无法通过它出声。\n"
+    if _is_linux_alsa():
+        caps = usb_capture_only_cards()
+        if caps:
+            usb_note = (
+                "\n你的 USB PnP Sound Device（芯片 PCM2902）在系统里只有麦克风通道，"
+                "没有播放通道，树莓派无法通过它出声。\n"
+            )
+    mac_note = ""
+    if platform.system() == "Darwin":
+        mac_note = (
+            "\n（Mac 开发机请用 afplay/ffplay 播放；完整麦克风对话请在树莓派上运行。）\n"
         )
     return (
-        "找不到可用的扬声器（aplay 全部失败）。\n"
-        f"{usb_note}"
+        "找不到可用的扬声器。\n"
+        f"{usb_note}{mac_note}"
         "请任选其一：\n"
         "  1. 另插带播放的 USB 音箱/耳机（推荐，与小麦克风可同时使用）\n"
         "  2. HDMI 接电视/显示器音响，并确保屏幕点亮\n"
+        "  3. Mac 上安装 ffmpeg 后可用 ffplay 试听\n"
         f"{hdmi_note}"
         "然后运行: python3 scripts/test_audio.py\n"
         "或在 src/.env 设置 MIC_DEVICE / SPK_DEVICE（见 test 输出）。\n"
@@ -491,6 +564,25 @@ def start_playback(wav_path: Path) -> subprocess.Popen:
     if backend == "pw-play" and shutil.which("pw-play"):
         return subprocess.Popen(
             ["pw-play", str(wav_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    if backend == "ffplay" and shutil.which("ffplay"):
+        return subprocess.Popen(
+            [
+                "ffplay",
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "quiet",
+                str(wav_path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    if backend == "afplay" and shutil.which("afplay"):
+        return subprocess.Popen(
+            ["afplay", str(wav_path)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
@@ -779,7 +871,8 @@ async def _edge_save_mp3(ssml: str, mp3: Path) -> None:
 async def _minimax_synthesize(text: str, mp3: Path, tts: TtsConfig) -> None:
     import aiohttp
 
-    if not MINIMAX_API_KEY:
+    api_key, api_base, group_id = _minimax_credentials()
+    if not api_key:
         raise RuntimeError("缺少 MINIMAX_API_KEY，请在 src/.env 配置")
 
     clean = re.sub(r"<<emotion:[^>]*>>", "", text, flags=re.I)
@@ -787,9 +880,8 @@ async def _minimax_synthesize(text: str, mp3: Path, tts: TtsConfig) -> None:
     if not clean:
         raise RuntimeError("MiniMax TTS：文本为空")
 
-    url = f"{MINIMAX_API_BASE}/t2a_v2"
-    group_id = MINIMAX_GROUP_ID
-    if group_id and not MINIMAX_API_KEY.startswith("sk-api-"):
+    url = f"{api_base}/t2a_v2"
+    if group_id and not api_key.startswith("sk-api-"):
         url = f"{url}?GroupId={group_id}"
 
     payload = {
@@ -808,7 +900,7 @@ async def _minimax_synthesize(text: str, mp3: Path, tts: TtsConfig) -> None:
     }
 
     headers = {
-        "Authorization": f"Bearer {MINIMAX_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
@@ -997,7 +1089,11 @@ async def text_to_speech_performative(
 def play_audio(path: Path) -> None:
     suffix = path.suffix.lower()
     if suffix == ".wav":
-        subprocess.run(["aplay", "-q", "-D", SPK, str(path)], check=True)
+        proc = start_playback(path)
+        proc.wait()
+        if proc.returncode != 0:
+            err = (proc.stderr.read() or b"").decode(errors="replace").strip()
+            raise RuntimeError(f"播放失败: {err}")
         return
 
     wav = path.with_suffix(".play.wav")
@@ -1011,7 +1107,7 @@ def play_audio(path: Path) -> None:
     proc.wait()
     if proc.returncode != 0:
         err = (proc.stderr.read() or b"").decode(errors="replace").strip()
-        raise RuntimeError(f"播放失败 ({SPK}): {err}")
+        raise RuntimeError(f"播放失败: {err}")
     wav.unlink(missing_ok=True)
 
 

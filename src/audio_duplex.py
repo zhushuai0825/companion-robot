@@ -202,7 +202,10 @@ class DuplexMicrophone:
                 self._speaking = False
             if temp_wav and temp_wav.exists():
                 temp_wav.unlink(missing_ok=True)
-            raise RuntimeError(f"aplay 打不开设备 {SPK}: {err or 'unknown'}")
+            raise RuntimeError(
+                f"播放失败（后端 {os.getenv('PLAYBACK_BACKEND', 'aplay')}）: "
+                f"{err or 'unknown'}"
+            )
 
         try:
             while True:
