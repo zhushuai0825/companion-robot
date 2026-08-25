@@ -51,7 +51,18 @@ def _mac_memo_text(body: str) -> bool:
         f'tell application "Notes" to make new note '
         f'at folder "Notes" with properties {{body:"{safe}"}}'
     )
-    return _run_osascript(script)
+    if _run_osascript(script):
+        return True
+    # Notes 权限不足时，退回写桌面便签文件（仍算「写进看得见的地方」）
+    try:
+        desk = Path.home() / "Desktop" / "路遥叮嘱.txt"
+        stamp = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M")
+        with desk.open("a", encoding="utf-8") as f:
+            f.write(f"[{stamp}] {body.strip()}\n")
+        _run_osascript(f'open POSIX file "{desk}"')
+        return True
+    except OSError:
+        return False
 
 
 def _mac_open_url(url: str) -> bool:
