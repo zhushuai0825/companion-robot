@@ -96,6 +96,14 @@ class CompanionMemory:
             parts.append(f"上次聊了什么（背景）：{last.get('summary', '')[:100]}")
         if self.data.get("last_seen"):
             parts.append(f"上次见面：{self.data['last_seen']}")
+            try:
+                from companion_presence import hours_since_last_seen
+
+                hours = hours_since_last_seen(self.data["last_seen"])
+                if hours is not None and hours >= 1:
+                    parts.append(f"距上次见面约 {int(hours)} 小时。")
+            except ImportError:
+                pass
         return "\n".join(parts)
 
     def apply_updates(

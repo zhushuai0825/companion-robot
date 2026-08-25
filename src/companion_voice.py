@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""情感陪伴语音模式：连续听 + 可打断播报（小智式单路麦克风常驻）。"""
+"""情感陪伴语音模式：连续听 + 可打断 + 摄像头在场感 + 远程桌面动作。"""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 
 from audio_duplex import get_duplex, shutdown_duplex
 from companion_brain import CompanionBrain
+from companion_presence import farewell_line, is_goodbye
 from voice_io import (
     apply_voice_settings,
     audio_setup_hint,
@@ -20,6 +21,8 @@ from voice_io import (
     speech_to_text,
     speak_performative_interruptible,
 )
+
+ROOT = Path(__file__).resolve().parent.parent
 
 EXIT_WORDS = frozenset(
     {
@@ -38,7 +41,9 @@ EXIT_WORDS = frozenset(
 
 def _is_exit(text: str) -> bool:
     t = text.strip().lower().replace(" ", "")
-    return t in EXIT_WORDS or any(w in t for w in ("退出", "再见", "拜拜"))
+    return t in EXIT_WORDS or is_goodbye(text) or any(
+        w in t for w in ("退出", "再见", "拜拜")
+    )
 
 
 async def _speak(
@@ -85,6 +90,8 @@ def _handle_interrupt_follow(
     except Exception as e:
         print(f"对话失败: {e}")
         return
+    if follow_result.actions:
+        print(f"（已执行动作: {', '.join(follow_result.actions)}）")
     print(f"{name}: {follow_result.text}")
     try:
         asyncio.run(
@@ -98,6 +105,24 @@ def _handle_interrupt_follow(
         )
     except Exception as e:
         print(f"播报失败: {e}")
+
+
+def _maybe_vision_context(brain: CompanionBrain) -> None:
+    vision_cfg = brain.cfg.get("vision") or {}
+    if not vision_cfg.get("enabled", False):
+        return
+    try:
+        from companion_vision import detect_presence, vision_context_for_brain
+
+        device = str(vision_cfg.get("device", "/dev/video0"))
+        out_dir = ROOT / "data"
+        snap = detect_presence(out_dir, device=device)
+        ctx = vision_context_for_brain(snap)
+        if ctx:
+            brain.set_extra_context(ctx)
+            print(f"（摄像头: {snap.detail}）")
+    except Exception as e:
+        print(f"（摄像头跳过: {e}）")
 
 
 def main() -> None:
@@ -122,6 +147,9 @@ def main() -> None:
             raise SystemExit(1) from e
         print("（未检测到扬声器，仅文字模式；接上 USB 音箱或 HDMI 音响后可出声）\n")
 
+    if (brain.cfg.get("vision") or {}).get("on_startup", True):
+        _maybe_vision_context(brain)
+
     duplex = get_duplex()
     duplex.start()
 
@@ -133,8 +161,12 @@ def main() -> None:
         "piper": "piper 本地",
     }
     backend_label = backend_labels.get(tts.backend, tts.backend)
+    actions_on = brain.actions_enabled
     print(f"「{name}」情感陪伴已启动（Vosk + DeepSeek + {backend_label}）。")
     print(f"麦克风: {mic}  扬声器: {spk if speaker_ok else '无（仅文字）'}")
+    if actions_on:
+        agent = os.getenv("DESKTOP_AGENT_URL", "")
+        print(f"桌面动作: 开 ({'远程 ' + agent if agent else '本机 Mac'})")
     print(describe_audio_hardware())
     print()
     model_note = tts.minimax_model if tts.backend == "minimax" else (tts.style or "默认")
@@ -142,7 +174,7 @@ def main() -> None:
     if continuous:
         print("模式: 连续听 — 直接说话，不用按回车。")
     if barge_in:
-        print("打断: 路遥说话时随时开口（麦克风保持开启，参考小智 Realtime 听）。")
+        print("打断: 路遥说话时随时开口。")
     print("说「退出」或「再见」结束。Ctrl+C 也可退出。\n")
 
     opening = brain.opening_line()
@@ -162,6 +194,7 @@ def main() -> None:
                 print(f"（开场播报失败: {e}）")
                 print(audio_setup_hint())
 
+        empty_listen_streak = 0
         while True:
             with tempfile.TemporaryDirectory() as td:
                 work = Path(td)
@@ -171,7 +204,19 @@ def main() -> None:
                     print("我在听…")
                     got = duplex.capture_to(wav)
                     if not got:
+                        empty_listen_streak += 1
+                        if empty_listen_streak >= 8:
+                            empty_listen_streak = 0
+                            from companion_presence import silence_prompt
+
+                            st, emo = silence_prompt()
+                            print(f"{name}: {st}")
+                            try:
+                                asyncio.run(_speak(brain, st, emo, work, speaker_ok=speaker_ok))
+                            except Exception:
+                                pass
                         continue
+                    empty_listen_streak = 0
                 else:
                     cmd = input("准备好了按回车开始录音（q 退出）: ").strip().lower()
                     if cmd in {"q", "quit", "exit"}:
@@ -197,10 +242,10 @@ def main() -> None:
 
                 if _is_exit(user_text):
                     print(f"你说: {user_text}")
-                    farewell = "嗯……那我先安静一会儿。你想找我说话的时候，我都在。"
+                    farewell, emo = farewell_line(name)
                     print(f"{name}: {farewell}")
                     try:
-                        asyncio.run(_speak(brain, farewell, "soft", work, speaker_ok=speaker_ok))
+                        asyncio.run(_speak(brain, farewell, emo, work, speaker_ok=speaker_ok))
                     except Exception:
                         pass
                     break
@@ -214,6 +259,8 @@ def main() -> None:
                     print(f"对话失败: {e}")
                     continue
 
+                if getattr(result, "actions", None):
+                    print(f"（已执行: {', '.join(result.actions)}）")
                 print(f"{name}: {result.text}")
 
                 try:

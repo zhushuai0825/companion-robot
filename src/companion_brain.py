@@ -13,6 +13,7 @@ from openai import OpenAI
 
 from companion_memory import CompanionMemory
 from companion_actions import apply_actions_to_reply
+from companion_presence import presence_context_block, proactive_care_line
 from companion_persona import (
     BANNED_PHRASES,
     CANON_EXPAND_POLISH,
@@ -28,7 +29,6 @@ from companion_persona import (
     max_tokens_for,
     min_chars_for,
     parse_reply_and_emotion,
-    pick_opening,
 )
 
 SRC = Path(__file__).resolve().parent
@@ -70,6 +70,7 @@ SESSION_SUMMARY_PROMPT = """用一句话概括这段对话发生了什么（情�
 class ChatResult:
     text: str
     emotion: str = "neutral"
+    actions: tuple[str, ...] = ()
 
 
 def _strip_robotic(text: str) -> str:
@@ -112,7 +113,10 @@ class CompanionBrain:
         self.max_open_loops = int(mem_cfg.get("max_open_loops", 10))
         self.summarize_every = int(mem_cfg.get("summarize_every", 8))
         self.actions_enabled = bool((self.cfg.get("actions") or {}).get("enabled", False))
+        if os.getenv("COMPANION_ACTIONS", "").strip() in ("1", "true", "yes"):
+            self.actions_enabled = True
 
+        self._extra_context = ""
         self.client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
         self._rebuild_messages()
 
@@ -126,13 +130,24 @@ class CompanionBrain:
             }
         ]
 
+    def set_extra_context(self, block: str) -> None:
+        self._extra_context = (block or "").strip()
+
     def refresh_system(self, user_text: str = "") -> None:
         hint = length_hint_for(user_text) if user_text else ""
+        memory_block = self.memory.context_block()
+        presence = presence_context_block(
+            str(self.memory.data.get("last_seen", "")),
+            str(self.memory.data.get("mood_note", "")),
+            str(self.memory.data.get("user_name", "")),
+        )
+        if presence:
+            memory_block = f"{memory_block}\n{presence}".strip()
+        if self._extra_context:
+            memory_block = f"{memory_block}\n{self._extra_context}".strip()
         self.messages[0] = {
             "role": "system",
-            "content": build_system_prompt(
-                self.cfg, self.memory.context_block(), hint
-            ),
+            "content": build_system_prompt(self.cfg, memory_block, hint),
         }
 
     def chat(self, user_text: str) -> ChatResult:
@@ -147,7 +162,7 @@ class CompanionBrain:
         )
         raw = (resp.choices[0].message.content or "").strip()
         polished = self._polish_if_needed(user_text, raw)
-        polished, _actions = apply_actions_to_reply(polished, self.actions_enabled)
+        polished, action_list = apply_actions_to_reply(polished, self.actions_enabled)
         text, emotion = parse_reply_and_emotion(polished)
         text = _cleanup_reply(text)
         if (
@@ -171,7 +186,11 @@ class CompanionBrain:
         self._maybe_remember(user_text, text)
         if self.summarize_every > 0 and self.memory.data["turn_count"] % self.summarize_every == 0:
             self._maybe_summarize_session()
-        return ChatResult(text=text, emotion=emotion)
+        care = proactive_care_line(self.memory.data)
+        if care:
+            text = f"{text} {care[0]}".strip()
+            emotion = care[1]
+        return ChatResult(text=text, emotion=emotion, actions=tuple(action_list))
 
     def _polish_if_needed(self, user_text: str, draft: str) -> str:
         if not self.polish or not draft:
@@ -336,11 +355,18 @@ class CompanionBrain:
             pass
 
     def opening_line(self) -> ChatResult:
+        from companion_presence import pick_absence_opening
+
         user = self.memory.data.get("user_name", "")
         hook = self.memory.pick_opening_hook()
-        line = pick_opening(self.cfg, user, hook)
-        emotion = "presence" if hook else "soft"
-        return ChatResult(text=line, emotion=emotion)
+        openings = self.cfg.get("openings") or []
+        text, emotion = pick_absence_opening(
+            str(self.memory.data.get("last_seen", "")),
+            hook,
+            list(openings),
+            str(user),
+        )
+        return ChatResult(text=text, emotion=emotion)
 
     def tts_voice(self) -> str:
         return self.tts_config().voice
@@ -377,4 +403,7 @@ class CompanionBrain:
         )
 
     def close(self) -> None:
+        mem_cfg = self.cfg.get("memory") or {}
+        if mem_cfg.get("summarize_on_close", True) and self.memory.data.get("turn_count", 0) > 0:
+            self._maybe_summarize_session()
         self.memory.save()

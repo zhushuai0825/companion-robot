@@ -51,8 +51,18 @@ memory:
   max_facts: 30
   max_open_loops: 10
   summarize_every: 8
+  summarize_on_close: true
+
+vision:
+  enabled: true
+  device: /dev/video0
+  on_startup: true
+
+presence:
+  enabled: true
 
 actions:
-  enabled: false
+  enabled: true
+  # 树莓派控制 Mac：Mac 运行 scripts/desktop_agent.py，Pi .env 设 DESKTOP_AGENT_URL
 
 # 微调训练集（不参与运行时检索）：data/dialogue_examples.jsonl

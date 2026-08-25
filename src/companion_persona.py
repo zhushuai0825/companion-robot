@@ -199,6 +199,13 @@ EMOTION_TAG_INSTRUCTION = """
 - 禁止在正文中间写标签；禁止 <<emotion:a|b|c>> 这种多选格式。
 """
 
+ACTION_TAG_INSTRUCTION = """
+【桌面动作（可选，用户需要「记下来」时）】
+- 叮嘱适合记下来时，正文末单独一行：<<action:open_memo>> 或 <<action:memo:要记的内容>>
+- 也可：<<action:notify:短提醒>> <<action:clipboard:要复制的字>>
+- 动作标签单独一行，用户不会念出来；正文里仍用自然语言说「我写进备忘录了」。
+"""
+
 POLISH_SYSTEM = """你是「路遥」式陪伴对白润色器（阿雾原台词）。
 具体唠叨、承认隔屏无力；不是客服，不是散文。
 
@@ -532,6 +539,8 @@ def build_system_prompt(cfg: dict, memory_context: str, length_hint: str = "") -
 {VOICE_RULES}
 
 {EMOTION_TAG_INSTRUCTION}
+
+{ACTION_TAG_INSTRUCTION}
 
 具体规则：
 - 先接住情绪里最关键的那一点，再回应；不要跳过感受直接给方案。
